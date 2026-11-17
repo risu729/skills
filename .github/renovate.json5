@@ -1,0 +1,6 @@
+{
+  // ref: https://docs.renovatebot.com/configuration-options/
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  // Upstream skills are synced by .github/workflows/sync.yml, not Renovate.
+  extends: ["github>risu729/renovate-config#3.23.4"],
+}

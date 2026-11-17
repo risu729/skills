@@ -1,0 +1,78 @@
+# Upstream sources mirrored into skills/.
+#
+# Only the skills listed here are copied, unmodified. `exclude` names
+# subdirectories that are dropped from every skill of that source; nothing
+# inside a copied file is edited. `license` is the upstream file that grants
+# the license; it is copied into each skill directory as LICENSE unless the
+# skill already ships its own (`skill_license`).
+#
+# scripts/skills.py update resolves each `branch` to its current commit and
+# records it in sources.lock.json; check rebuilds from the locked commits.
+
+[[source]]
+name = "cloudflare"
+repo = "cloudflare/skills"
+branch = "main"
+path = "skills"
+license = "LICENSE"
+spdx = "Apache-2.0"
+skills = [
+  "agents-sdk",
+  "basin",
+  "cf-cli",
+  "cloudflare",
+  "cloudflare-app-bootstrap",
+  "cloudflare-email-service",
+  "cloudflare-one",
+  "cloudflare-one-migrations",
+  "durable-objects",
+  "frameworks-on-cloudflare",
+  "gateway-workers",
+  "k2",
+  "nextjs-on-cloudflare",
+  "sandbox-migrate-to-next",
+  "sandbox-next",
+  "sandbox-stable",
+  "turnstile-spin",
+  "web-perf",
+  "workers-best-practices",
+  "workers-development",
+  "workers-profiling",
+  "wrangler",
+]
+
+# The openai-developers plugin manifest says "Proprietary" and the repository
+# has no root license. Only the two skills that carry their own Apache-2.0
+# LICENSE.txt are mirrored. Their agents/ metadata is dropped because it
+# declares an MCP server dependency.
+[[source]]
+name = "openai"
+repo = "openai/plugins"
+branch = "main"
+path = "plugins/openai-developers/skills"
+skill_license = "LICENSE.txt"
+spdx = "Apache-2.0"
+exclude = ["agents"]
+skills = [
+  "build-chatgpt-app",
+  "chatgpt-app-submission",
+]
+
+[[source]]
+name = "mattpocock"
+repo = "mattpocock/skills"
+branch = "main"
+path = "skills/productivity"
+license = "LICENSE"
+spdx = "MIT"
+exclude = ["agents"]
+skills = ["grilling"]
+
+[[source]]
+name = "gh-stack"
+repo = "github/gh-stack"
+branch = "main"
+path = "skills"
+license = "LICENSE"
+spdx = "MIT"
+skills = ["gh-stack"]

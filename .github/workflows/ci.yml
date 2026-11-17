@@ -1,0 +1,32 @@
+name: CI
+# No path filters: CI Check is a required status check, and a workflow skipped
+# by a path filter leaves it pending instead of reporting success.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  # The sync workflow dispatches this run for its pull request, because pull
+  # requests opened with GITHUB_TOKEN do not start pull_request workflows.
+  workflow_dispatch:
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+permissions: {}
+defaults:
+  run:
+    shell: bash
+jobs:
+  check:
+    name: CI Check
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the mirror against the locked upstream commits
+        run: python3 scripts/skills.py check --upstream
