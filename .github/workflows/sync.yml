@@ -57,6 +57,11 @@ jobs:
           git switch --create "${SYNC_BRANCH}"
           git add --all
           git commit --quiet --message "chore: sync upstream skills"
+          auto_merge="$(cat "${RUNNER_TEMP}/auto-merge")"
+          if [[ -n "${pr}" && "${auto_merge}" != "true" ]]; then
+            # Turn auto-merge off before new commits can satisfy the checks.
+            gh pr merge "${pr}" --disable-auto || true
+          fi
           git push --force origin "${SYNC_BRANCH}"
           if [[ -n "${pr}" ]]; then
             gh pr edit "${pr}" --body-file "${RUNNER_TEMP}/body.md"
@@ -69,8 +74,6 @@ jobs:
           gh workflow run ci.yml --ref "${SYNC_BRANCH}"
           # Only Markdown and license changes merge without review. Scripts
           # and other files wait for a person.
-          if [[ "$(cat "${RUNNER_TEMP}/auto-merge")" == "true" ]]; then
+          if [[ "${auto_merge}" == "true" ]]; then
             gh pr merge "${SYNC_BRANCH}" --auto --squash
-          else
-            gh pr merge "${SYNC_BRANCH}" --disable-auto || true
           fi

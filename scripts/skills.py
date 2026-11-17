@@ -68,7 +68,7 @@ SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 # asking, so any other key fails the check.
 ALLOWED_FRONTMATTER = {"name", "description", "license", "metadata", "compatibility"}
 # Claude Code runs `!`command`` and ```! blocks in a skill when it loads.
-SHELL_INJECTION = re.compile(r"(^|\s)!`|^```!", re.MULTILINE)
+SHELL_INJECTION = re.compile(r"(^|\s)!`|^[ \t]*```!", re.MULTILINE)
 
 
 class SyncError(Exception):
@@ -144,9 +144,14 @@ def frontmatter(text: str) -> dict[str, str]:
     for line in lines[1:]:
         if line.strip() == "---":
             return fields
+        if not line.strip() or line.startswith((" ", "\t", "#")):
+            continue
         match = re.match(r"^([A-Za-z_][\w-]*):(?:\s+(.*))?$", line)
-        if match:
-            fields[match.group(1)] = (match.group(2) or "").strip().strip("'\"")
+        if not match:
+            # Quoted, merge (<<) or complex (?) keys could smuggle in keys the
+            # allowlist would reject, so anything unrecognised fails closed.
+            raise SyncError(f"SKILL.md frontmatter line not understood: {line!r}")
+        fields[match.group(1)] = (match.group(2) or "").strip().strip("'\"")
     raise SyncError("SKILL.md frontmatter is not closed")
 
 
