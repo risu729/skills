@@ -28,23 +28,28 @@ jobs:
         with:
           persist-credentials: false
       - name: Rebuild from the current upstream branches
-        run: python3 scripts/skills.py update --summary "${RUNNER_TEMP}/summary.md"
+        run: >-
+          python3 scripts/skills.py update
+          --summary "${RUNNER_TEMP}/summary.md"
+          --auto-merge-flag "${RUNNER_TEMP}/auto-merge"
       - name: Validate the rebuilt mirror
         run: python3 scripts/skills.py check
       - name: Open or refresh the sync pull request
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          pr="$(gh pr list --head "${SYNC_BRANCH}" --state open --json number --jq '.[0].number')"
           if [[ -z "$(git status --porcelain)" ]]; then
             echo "Upstream unchanged."
+            if [[ -n "${pr}" ]]; then
+              gh pr close "${pr}" --delete-branch --comment "main already matches upstream."
+            fi
             exit 0
           fi
           {
             echo "Automated sync of the mirrored upstream skills."
             echo
             cat "${RUNNER_TEMP}/summary.md"
-            echo
-            echo "Merges automatically once \`CI Check\` passes."
           } > "${RUNNER_TEMP}/body.md"
           gh auth setup-git
           git config user.name "github-actions[bot]"
@@ -53,12 +58,19 @@ jobs:
           git add --all
           git commit --quiet --message "chore: sync upstream skills"
           git push --force origin "${SYNC_BRANCH}"
-          pr="$(gh pr list --head "${SYNC_BRANCH}" --state open --json number --jq '.[0].number')"
           if [[ -n "${pr}" ]]; then
             gh pr edit "${pr}" --body-file "${RUNNER_TEMP}/body.md"
           else
             gh pr create --head "${SYNC_BRANCH}" --base main \
               --title "chore: sync upstream skills" --body-file "${RUNNER_TEMP}/body.md"
           fi
-          gh pr merge "${SYNC_BRANCH}" --auto --squash
+          # Pull requests opened with GITHUB_TOKEN start no pull_request
+          # workflows; workflow_dispatch is the documented exception.
           gh workflow run ci.yml --ref "${SYNC_BRANCH}"
+          # Only Markdown and license changes merge without review. Scripts
+          # and other files wait for a person.
+          if [[ "$(cat "${RUNNER_TEMP}/auto-merge")" == "true" ]]; then
+            gh pr merge "${SYNC_BRANCH}" --auto --squash
+          else
+            gh pr merge "${SYNC_BRANCH}" --disable-auto || true
+          fi

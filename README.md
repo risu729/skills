@@ -48,16 +48,26 @@ The plugin has no `version`, so clients follow the latest commit.
 
 [`sync.yml`](.github/workflows/sync.yml) runs daily. It resolves each
 upstream branch, rebuilds `skills/` with `scripts/skills.py update`, and opens
-or refreshes a pull request listing the upstream compare links and changed
-files. Upstream skills that are not in `sources.toml` are only reported in that
-pull request, never copied. The pull request merges automatically once
-`CI Check` passes.
+or refreshes the `sync/upstream` pull request with upstream compare links and
+the changed files. Upstream skills that are not in `sources.toml` are only
+reported there, never copied. If upstream already matches `main`, an open sync
+pull request is closed.
+
+The pull request merges automatically once `CI Check` passes only when every
+changed file is Markdown or a license file. Any other change, such as a script,
+turns auto-merge off and waits for a person to review the compare links.
 
 `CI Check` runs `scripts/skills.py check --upstream`. It fails when:
 
-- `skills/` differs from a fresh copy of the locked upstream commits;
+- `skills/` differs from a fresh copy of the locked upstream commits, in
+  content or executable bit, or a locked commit is not on its upstream branch;
 - a listed skill disappears upstream, or a skill directory is not listed;
-- a `SKILL.md` lacks frontmatter, or its `name` differs from its directory;
+- a `SKILL.md` lacks frontmatter, its `name` differs from its directory, or it
+  uses a frontmatter key outside `name`, `description`, `license`, `metadata`
+  and `compatibility` (client extensions such as `hooks` or `allowed-tools`
+  change what a skill may do without asking);
+- a Markdown file contains a shell command that runs when the skill loads
+  (`` !`command` `` or a ```` ```! ```` block);
 - a skill has no license file, contains a symlink, or contains a plugin
   component (`.mcp.json`, `hooks`, plugin manifests);
 - a manifest declares anything besides skills;
@@ -66,3 +76,12 @@ pull request, never copied. The pull request merges automatically once
 To add or remove a skill, edit `sources.toml`, run
 `python3 scripts/skills.py update`, and open a pull request. Python 3.11 or
 later and Git are the only requirements.
+
+## Repository settings the workflows rely on
+
+- Actions: "Allow GitHub Actions to create and approve pull requests" on, so
+  `sync.yml` can open its pull request with `GITHUB_TOKEN`.
+- Pull requests: squash merging only, auto-merge allowed.
+- Ruleset on `main`: pull request with no required approvals, signed commits
+  (GitHub signs squash merges), linear history, and the `CI Check` and CodeQL
+  checks.

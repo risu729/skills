@@ -63,6 +63,12 @@ FORBIDDEN_NAMES = {
     ".codex-plugin",
 }
 SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+# Frontmatter keys of the Agent Skills format. Client extensions such as
+# `hooks`, `allowed-tools` or `context` change what a skill may do without
+# asking, so any other key fails the check.
+ALLOWED_FRONTMATTER = {"name", "description", "license", "metadata", "compatibility"}
+# Claude Code runs `!`command`` and ```! blocks in a skill when it loads.
+SHELL_INJECTION = re.compile(r"(^|\s)!`|^```!", re.MULTILINE)
 
 
 class SyncError(Exception):
@@ -138,9 +144,9 @@ def frontmatter(text: str) -> dict[str, str]:
     for line in lines[1:]:
         if line.strip() == "---":
             return fields
-        match = re.match(r"^([A-Za-z_][\w-]*):\s*(.*)$", line)
+        match = re.match(r"^([A-Za-z_][\w-]*):(?:\s+(.*))?$", line)
         if match:
-            fields[match.group(1)] = match.group(2).strip().strip("'\"")
+            fields[match.group(1)] = (match.group(2) or "").strip().strip("'\"")
     raise SyncError("SKILL.md frontmatter is not closed")
 
 
@@ -154,6 +160,9 @@ def validate_skill(skill_dir: Path) -> None:
         raise SyncError(f"{name}: frontmatter name is {fields.get('name')!r}")
     if "description" not in fields:
         raise SyncError(f"{name}: frontmatter has no description")
+    extra = set(fields) - ALLOWED_FRONTMATTER
+    if extra:
+        raise SyncError(f"{name}: frontmatter keys outside the allowlist: {sorted(extra)}")
     if not (skill_dir / "LICENSE").is_file() and not (skill_dir / "LICENSE.txt").is_file():
         raise SyncError(f"{name}: no LICENSE or LICENSE.txt")
     for path in skill_dir.rglob("*"):
@@ -162,6 +171,8 @@ def validate_skill(skill_dir: Path) -> None:
             raise SyncError(f"{name}: symlink {rel}")
         if path.name in FORBIDDEN_NAMES:
             raise SyncError(f"{name}: forbidden plugin component {rel}")
+        if path.suffix == ".md" and SHELL_INJECTION.search(path.read_text(encoding="utf-8")):
+            raise SyncError(f"{name}: {rel} contains a shell command that runs on load")
 
 
 def copy_skill(source: dict, upstream: Path, skill: str, out: Path) -> None:
@@ -182,6 +193,7 @@ def copy_skill(source: dict, upstream: Path, skill: str, out: Path) -> None:
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, target)
+            os.chmod(target, 0o755 if os.access(path, os.X_OK) else 0o644)
     if "skill_license" in source:
         if not (dst / source["skill_license"]).is_file():
             raise SyncError(f"{skill}: upstream {source['skill_license']} is missing")
@@ -198,24 +210,53 @@ def unlisted_skills(source: dict, upstream: Path) -> list[str]:
     return sorted(found - set(source["skills"]))
 
 
-def build(sources: list[dict], commits: dict[str, str], out: Path, work: Path) -> dict[str, list[str]]:
+def require_on_branch(source: dict, commit: str, repo: Path) -> None:
+    """Fail unless commit is reachable from the upstream branch.
+
+    A fetch by SHA also serves unmerged pull request commits, so a hand-edited
+    lock could otherwise point at code that never landed upstream.
+    """
+    git("fetch", "-q", "--filter=tree:0", "origin", f"refs/heads/{source['branch']}", cwd=repo)
+    try:
+        git("merge-base", "--is-ancestor", commit, "FETCH_HEAD", cwd=repo)
+    except subprocess.CalledProcessError:
+        raise SyncError(
+            f"{source['repo']}: {commit} is not on branch {source['branch']!r}"
+        ) from None
+
+
+def build(
+    sources: list[dict],
+    commits: dict[str, str],
+    out: Path,
+    work: Path,
+    verify_branch: bool = False,
+) -> dict[str, list[str]]:
     """Build skills into out from the given commits. Returns unlisted skills per source."""
     out.mkdir(parents=True)
     unlisted: dict[str, list[str]] = {}
     for source in sources:
         upstream = fetch(source, commits[source["name"]], work / source["name"])
+        if verify_branch:
+            require_on_branch(source, commits[source["name"]], upstream)
         for skill in source["skills"]:
             copy_skill(source, upstream, skill, out)
         unlisted[source["name"]] = unlisted_skills(source, upstream)
     return unlisted
 
 
+def file_mode(path: Path) -> str:
+    return "100755" if os.access(path, os.X_OK) else "100644"
+
+
 def file_hashes(skills_dir: Path) -> dict[str, str]:
+    """Map each file to "<git mode> <sha256>"."""
     hashes = {}
     for path in sorted(skills_dir.rglob("*")):
         if path.is_file():
             rel = path.relative_to(skills_dir.parent).as_posix()
-            hashes[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            hashes[rel] = f"{file_mode(path)} {digest}"
     return hashes
 
 
@@ -272,6 +313,8 @@ def compare_trees(expected: Path, actual: Path) -> list[str]:
     for p in sorted(exp & act):
         if not filecmp.cmp(expected / p, actual / p, shallow=False):
             diffs.append(f"differs {p}")
+        elif file_mode(expected / p) != file_mode(actual / p):
+            diffs.append(f"mode differs {p}")
     return diffs
 
 
@@ -309,14 +352,17 @@ def cmd_check(upstream: bool) -> None:
     if upstream:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "skills"
-            build(sources, commits, out, Path(tmp) / "work")
+            build(sources, commits, out, Path(tmp) / "work", verify_branch=True)
             diffs = compare_trees(out, SKILLS_DIR)
             if diffs:
                 raise SyncError("skills/ differs from the locked upstreams:\n" + "\n".join(diffs))
     print(f"ok: {len(present)} skills")
 
 
-def cmd_update(summary: Path | None) -> None:
+REVIEW_FREE = re.compile(r"(\.md|/LICENSE(\.txt)?)$")
+
+
+def cmd_update(summary: Path | None, auto_merge_flag: Path | None) -> None:
     sources = load_sources()
     old = json.loads(LOCK_FILE.read_text(encoding="utf-8")) if LOCK_FILE.exists() else None
     commits = {s["name"]: resolve_branch(s) for s in sources}
@@ -330,11 +376,31 @@ def cmd_update(summary: Path | None) -> None:
     write_json(LOCK_FILE, lock)
     NOTICE_FILE.write_text(notice_text(sources, commits), encoding="utf-8")
     check_manifests()
+    changed = changed_files(old, lock)
+    review_free = bool(changed) and all(REVIEW_FREE.search(f) for f in changed)
     if summary:
-        summary.write_text(summary_text(sources, old, lock, unlisted), encoding="utf-8")
+        summary.write_text(
+            summary_text(sources, old, lock, unlisted, changed, review_free), encoding="utf-8"
+        )
+    if auto_merge_flag:
+        auto_merge_flag.write_text("true\n" if review_free else "false\n", encoding="utf-8")
 
 
-def summary_text(sources: list[dict], old: dict | None, new: dict, unlisted: dict[str, list[str]]) -> str:
+def changed_files(old: dict | None, new: dict) -> list[str]:
+    old_files = old["files"] if old else {}
+    return sorted(
+        f for f in set(old_files) | set(new["files"]) if old_files.get(f) != new["files"].get(f)
+    )
+
+
+def summary_text(
+    sources: list[dict],
+    old: dict | None,
+    new: dict,
+    unlisted: dict[str, list[str]],
+    changed: list[str],
+    review_free: bool,
+) -> str:
     lines = ["Upstream commits:", ""]
     for source in sources:
         name = source["name"]
@@ -345,14 +411,16 @@ def summary_text(sources: list[dict], old: dict | None, new: dict, unlisted: dic
             lines.append(f"- {source['repo']}: [`{before[:7]}...{after[:7]}`]({compare})")
         else:
             lines.append(f"- {source['repo']}: `{after[:7]}`" + (" (unchanged)" if before else ""))
-    old_files = old["files"] if old else {}
-    changed = sorted(
-        f for f in set(old_files) | set(new["files"]) if old_files.get(f) != new["files"].get(f)
-    )
     lines += ["", f"Changed files: {len(changed)}", ""]
     lines += [f"- `{f}`" for f in changed[:100]]
     if len(changed) > 100:
         lines.append(f"- … and {len(changed) - 100} more")
+    if not review_free:
+        lines += [
+            "",
+            "**Needs review:** files other than Markdown and license files changed, so",
+            "auto-merge is off. Check the compare links, especially scripts.",
+        ]
     new_skills = {k: v for k, v in unlisted.items() if v}
     if new_skills:
         lines += ["", "Upstream skills not mirrored (add them to sources.toml to include):", ""]
@@ -366,12 +434,17 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     update = sub.add_parser("update")
     update.add_argument("--summary", type=Path, help="write a Markdown change summary here")
+    update.add_argument(
+        "--auto-merge-flag",
+        type=Path,
+        help="write true here when only Markdown and license files changed",
+    )
     check = sub.add_parser("check")
     check.add_argument("--upstream", action="store_true", help="also rebuild from locked commits")
     args = parser.parse_args()
     try:
         if args.command == "update":
-            cmd_update(args.summary)
+            cmd_update(args.summary, args.auto_merge_flag)
         else:
             cmd_check(args.upstream)
     except (SyncError, subprocess.CalledProcessError) as error:
