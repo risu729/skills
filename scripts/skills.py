@@ -198,7 +198,8 @@ def copy_skill(source: dict, upstream: Path, skill: str, out: Path) -> None:
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, target)
-            os.chmod(target, 0o755 if os.access(path, os.X_OK) else 0o644)
+            # Keep the executable bit: skills run their scripts directly.
+            shutil.copymode(path, target)
     if "skill_license" in source:
         if not (dst / source["skill_license"]).is_file():
             raise SyncError(f"{skill}: upstream {source['skill_license']} is missing")
